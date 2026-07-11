@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scientific Tensor Generator</title>
+<style>
+  :root{
+    --ink: #1a1a1a;
+    --line: #1a1a1a;
+    --gray: #6b6b6b;
+    --gray-light: #9a9a9a;
+    --bg: #fbfaf7;
+    --panel: #ffffff;
+    --orange: #d98a2b;
+    --idle: #7b5cc0;
+    --running: #2f6fd6;
+    --finished: #3a8f5a;
+    --radius: 10px;
+  }
+
+  *{ box-sizing: border-box; }
+
+  html, body{
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+  }
+
+  .mono{
+    font-family: "Courier New", Courier, monospace;
+  }
+
+  .wrap{
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px 24px 60px;
+  }
+
+  header{
+    margin-bottom: 28px;
+  }
+  h1{
+    font-size: 30px;
+    font-weight: normal;
+    margin: 0 0 4px;
+    letter-spacing: 0.01em;
+  }
+  header p{
+    margin: 0;
+    color: var(--gray);
+    font-size: 15px;
+  }
+
+  .grid{
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 24px;
+  }
+  @media (max-width: 820px){
+    .grid{ grid-template-columns: 1fr; }
+  }
+
+  .left-col{
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .box{
+    border: 1.5px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    padding: 18px 20px;
+  }
+  .box + .box{ margin-top: 20px; }
+
+  .box-label{
+    font-size: 14px;
+    margin: 0 0 10px;
+    color: var(--ink);
+  }
+
+  /* --- controls --- */
+  .field{ margin-bottom: 18px; }
+  .field:last-child{ margin-bottom: 0; }
+
+  .field label{
+    display: block;
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+
+  select, input[type="text"]{
+    width: 100%;
+    padding: 9px 10px;
+    border: 1.5px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 14px;
+    font-family: "Courier New", Courier, monospace;
+    outline: none;
+  }
+  select:focus, input[type="text"]:focus{
+    border-color: var(--orange);
+  }
+
+  .hint{
+    font-size: 12px;
+    color: var(--gray-light);
+    margin: 5px 0 0;
+    font-family: "Courier New", Courier, monospace;
+  }
+
+  .generate-btn{
+    width: 100%;
+    padding: 12px;
+    border: 2px solid var(--orange);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 15px;
+    font-family: Georgia, serif;
+    cursor: pointer;
+  }
+  .generate-btn:hover:not(:disabled){ background: #fbeedb; }
+  .generate-btn:disabled{
+    border-color: var(--gray-light);
+    color: var(--gray-light);
+    cursor: not-allowed;
+  }
+
+  .server-note{
+    text-align: center;
+    font-size: 11px;
+    color: var(--gray-light);
+    margin: 8px 0 0;
+    font-family: "Courier New", Courier, monospace;
+  }
+
+  /* --- status --- */
+  .status-box{
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+  .status-line{
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 12px;
+    font-size: 15px;
+    font-family: "Courier New", Courier, monospace;
+  }
+  .status-line span{
+    color: var(--gray-light);
+    opacity: 0.45;
+  }
+  .status-line span.active{
+    opacity: 1;
+    font-weight: bold;
+  }
+  .status-line .idle.active{ color: var(--idle); }
+  .status-line .running.active{ color: var(--running); }
+  .status-line .finished.active{ color: var(--finished); }
+  .status-time{
+    display: block;
+    margin-top: 6px;
+    min-height: 16px;
+    font-size: 12px;
+    color: var(--gray-light);
+    font-family: "Courier New", Courier, monospace;
+  }
+
+  /* --- viewer --- */
+  .viewer-stage{
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    background: #f1f0eb;
+    aspect-ratio: 16/9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+  }
+  .play-triangle{
+    width: 0; height: 0;
+    border-top: 20px solid transparent;
+    border-bottom: 20px solid transparent;
+    border-left: 30px solid var(--gray-light);
+    margin-left: 8px;
+  }
+  .viewer-stage .msg{
+    font-family: "Courier New", Courier, monospace;
+    font-size: 13px;
+    color: var(--gray-light);
+  }
+  .frame-badge{
+    position: absolute;
+    bottom: 10px; right: 12px;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 12px;
+    color: var(--gray);
+    background: rgba(255,255,255,0.8);
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+
+  .timeline-block{
+    margin-top: 16px;
+  }
+  .timeline-head{
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    margin-bottom: 8px;
+    font-family: "Courier New", Courier, monospace;
+  }
+  .timeline-head .t-label{ color: var(--gray); }
+  .timeline-head .t-frame{ color: var(--ink); }
+
+  input[type="range"]{
+    -webkit-appearance: none;
+    width: 100%;
+    height: 3px;
+    background: var(--gray-light);
+    border-radius: 2px;
+    outline: none;
+  }
+  input[type="range"]:disabled{ opacity: 0.4; }
+  input[type="range"]::-webkit-slider-thumb{
+    -webkit-appearance: none;
+    width: 15px; height: 15px;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 2px solid var(--ink);
+    cursor: pointer;
+  }
+  input[type="range"]::-moz-range-thumb{
+    width: 15px; height: 15px;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 2px solid var(--ink);
+    cursor: pointer;
+  }
+
+  /* --- dataset card --- */
+  .card-row{
+    margin-top: 24px;
+  }
+  .card-body{
+    font-size: 14px;
+    color: var(--gray);
+    line-height: 1.6;
+    margin: 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <h1>Scientific Tensor Generator</h1>
+    <p>Powered by DiffATS</p>
+  </header>
+
+  <div class="grid">
+
+    <!-- LEFT COLUMN -->
+    <div class="left-col">
+      <div class="box">
+        <div class="field">
+          <label for="dataset">Dataset</label>
+          <select id="dataset">
+            <option value="" selected>&nbsp;</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="seed">Seed</label>
+          <input type="text" id="seed" inputmode="numeric" value="8" maxlength="3">
+          <p class="hint">0–999</p>
+        </div>
+
+        <div class="field">
+          <button class="generate-btn" id="generateBtn">Generate</button>
+          <p class="server-note">1 GPU · 1 job at a time</p>
+        </div>
+      </div>
+
+      <div class="box status-box">
+        <p class="box-label">Generation Status</p>
+        <div class="status-line">
+          <span class="idle active" id="s-idle">Idle</span>
+          <span class="running" id="s-running">Running</span>
+          <span class="finished" id="s-finished">Finished</span>
+        </div>
+        <span class="status-time" id="statusTime"></span>
+      </div>
+    </div>
+
+    <!-- RIGHT COLUMN -->
+    <div class="right-col">
+      <div class="box">
+        <div class="viewer-stage" id="viewerStage">
+          <div class="play-triangle"></div>
+          <div class="msg" id="viewerMsg">Video Viewer</div>
+          <span class="frame-badge" id="frameBadge" style="display:none;"></span>
+        </div>
+
+        <div class="timeline-block">
+          <div class="timeline-head">
+            <span class="t-label">Timeline</span>
+            <span class="t-frame" id="frameReadout">frame 0</span>
+          </div>
+          <input type="range" id="timeline" min="0" max="0" value="0" disabled>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-row">
+    <div class="box">
+      <p class="box-label">Dataset Card / Info</p>
+      <p class="card-body" id="cardBody">Dataset details will appear here once the dataset options are finalized.</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const NUM_FRAMES = 60;
+
+  const el = (id) => document.getElementById(id);
+  const seedInput = el('seed');
+  const generateBtn = el('generateBtn');
+  const sIdle = el('s-idle');
+  const sRunning = el('s-running');
+  const sFinished = el('s-finished');
+  const statusTime = el('statusTime');
+  const viewerStage = el('viewerStage');
+  const viewerMsg = el('viewerMsg');
+  const frameBadge = el('frameBadge');
+  const timeline = el('timeline');
+  const frameReadout = el('frameReadout');
+
+  let runStart = null;
+  let timerHandle = null;
+
+  function clampSeed(){
+    let v = parseInt(seedInput.value.replace(/[^0-9]/g, ''), 10);
+    if (isNaN(v)) v = 0;
+    v = Math.max(0, Math.min(999, v));
+    seedInput.value = v;
+    return v;
+  }
+  seedInput.addEventListener('input', () => {
+    const raw = seedInput.value.replace(/[^0-9]/g, '');
+    if (raw.length > 3) seedInput.value = raw.slice(0, 3);
+  });
+  seedInput.addEventListener('blur', clampSeed);
+
+  function setStatus(state){
+    [sIdle, sRunning, sFinished].forEach(s => s.classList.remove('active'));
+    if (state === 'idle') sIdle.classList.add('active');
+    if (state === 'running') sRunning.classList.add('active');
+    if (state === 'finished') sFinished.classList.add('active');
+  }
+
+  function startTimer(){
+    runStart = Date.now();
+    timerHandle = setInterval(() => {
+      statusTime.textContent = ((Date.now() - runStart) / 1000).toFixed(1) + 's';
+    }, 100);
+  }
+  function stopTimer(){ clearInterval(timerHandle); }
+
+  generateBtn.addEventListener('click', () => {
+    clampSeed();
+    generateBtn.disabled = true;
+    generateBtn.textContent = 'Running…';
+    seedInput.disabled = true;
+    setStatus('running');
+    startTimer();
+    viewerMsg.textContent = 'Generating…';
+    frameBadge.style.display = 'none';
+
+    const fakeLatency = 1500 + Math.random() * 800;
+    setTimeout(() => {
+      stopTimer();
+      setStatus('finished');
+      generateBtn.disabled = false;
+      generateBtn.textContent = 'Generate';
+      seedInput.disabled = false;
+
+      viewerMsg.textContent = 'Video Viewer';
+      frameBadge.style.display = 'inline-block';
+      frameBadge.textContent = 'frame 0 / ' + (NUM_FRAMES - 1);
+
+      timeline.max = NUM_FRAMES - 1;
+      timeline.value = 0;
+      timeline.disabled = false;
+      frameReadout.textContent = 'frame 0';
+    }, fakeLatency);
+  });
+
+  timeline.addEventListener('input', () => {
+    const idx = timeline.value;
+    frameReadout.textContent = 'frame ' + idx;
+    frameBadge.textContent = 'frame ' + idx + ' / ' + (NUM_FRAMES - 1);
+  });
+</script>
+
+</body>
+</html>
