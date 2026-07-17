@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# This file is old. Refer to tutorial.MD. 
+
 # ── STEP 1: Log into the server ─────────────────────────────────────────────
 ssh [NAME]@[IP]
 git clone https://github.com/JinhuaLyu/DiffATS.git
