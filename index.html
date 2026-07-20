@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Scientific Tensor Generator</title>
+<title>Scientific Tensor Generator — Presets</title>
 <style>
   :root{
     --ink: #1a1a1a;
@@ -17,6 +17,10 @@
     --running: #2f6fd6;
     --finished: #3a8f5a;
     --radius: 10px;
+    --stage-bg: #f1f0eb;
+    --hover-tint: #f1f0eb;
+    --orange-tint: #fbeedb;
+    --badge-bg: rgba(255,255,255,0.8);
   }
 
   *{ box-sizing: border-box; }
@@ -114,6 +118,13 @@
     font-family: "Courier New", Courier, monospace;
   }
 
+  .preset-desc{
+    font-size: 12.5px;
+    color: var(--gray);
+    line-height: 1.5;
+    margin: 8px 0 0;
+  }
+
   .generate-btn{
     width: 100%;
     padding: 12px;
@@ -125,7 +136,7 @@
     font-family: Georgia, serif;
     cursor: pointer;
   }
-  .generate-btn:hover:not(:disabled){ background: #fbeedb; }
+  .generate-btn:hover:not(:disabled){ background: var(--orange-tint); }
   .generate-btn:disabled{
     border-color: var(--gray-light);
     color: var(--gray-light);
@@ -176,10 +187,38 @@
   }
 
   /* --- viewer --- */
+  .viewer-head{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 10px;
+  }
+  .viewer-head .box-label{ margin: 0; }
+  .viewer-head-btns{
+    display: flex;
+    gap: 8px;
+  }
+  .attach-btn{
+    padding: 6px 12px;
+    border: 1.5px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 12px;
+    font-family: "Courier New", Courier, monospace;
+    cursor: pointer;
+  }
+  .attach-btn:hover:not(:disabled){ background: var(--hover-tint); }
+  .attach-btn:disabled{
+    border-color: var(--gray-light);
+    color: var(--gray-light);
+    cursor: not-allowed;
+  }
+
   .viewer-stage{
     border: 1.5px solid var(--line);
     border-radius: 8px;
-    background: #f1f0eb;
+    background: var(--stage-bg);
     aspect-ratio: 16/9;
     display: flex;
     align-items: center;
@@ -187,6 +226,13 @@
     flex-direction: column;
     gap: 10px;
     position: relative;
+    overflow: hidden;
+  }
+  .video-player{
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
   }
   .play-triangle{
     width: 0; height: 0;
@@ -206,7 +252,7 @@
     font-family: "Courier New", Courier, monospace;
     font-size: 12px;
     color: var(--gray);
-    background: rgba(255,255,255,0.8);
+    background: var(--badge-bg);
     padding: 2px 8px;
     border: 1px solid var(--line);
     border-radius: 4px;
@@ -268,7 +314,7 @@
 
   <header>
     <h1>Scientific Tensor Generator</h1>
-    <p>Powered by DiffATS</p>
+    <p>Powered by DiffATS · preset parameter bundles</p>
   </header>
 
   <div class="grid">
@@ -280,6 +326,7 @@
           <label for="dataset">Dataset</label>
           <select id="dataset">
             <option value="" selected>&nbsp;</option>
+            <option value="karman_vortex">Karman Vortex</option>
           </select>
         </div>
 
@@ -288,6 +335,8 @@
           <input type="text" id="seed" inputmode="numeric" value="8" maxlength="3">
           <p class="hint">0–999</p>
         </div>
+
+        <div class="field" id="paramFields"></div>
 
         <div class="field">
           <button class="generate-btn" id="generateBtn">Generate</button>
@@ -308,8 +357,15 @@
     <!-- RIGHT COLUMN -->
     <div class="right-col">
       <div class="box">
+        <div class="viewer-head">
+          <p class="box-label">Preview</p>
+          <div class="viewer-head-btns">
+            <button class="attach-btn" id="clearBtn" type="button" disabled>Clear Video</button>
+          </div>
+        </div>
         <div class="viewer-stage" id="viewerStage">
-          <div class="play-triangle"></div>
+          <video class="video-player" id="videoPlayer" style="display:none;" playsinline></video>
+          <div class="play-triangle" id="playTriangle"></div>
           <div class="msg" id="viewerMsg">Video Viewer</div>
           <span class="frame-badge" id="frameBadge" style="display:none;"></span>
         </div>
@@ -335,9 +391,74 @@
 </div>
 
 <script>
-  const NUM_FRAMES = 60;
-
   const el = (id) => document.getElementById(id);
+
+  // Per-dataset parameter *bundles*. Instead of exposing niu/Re/cx/cy/r as
+  // independently-editable fields, each dataset offers a handful of presets
+  // — fixed combinations spaced across the full range seen in that dataset's
+  // test set — so a specific, describable regime can be picked in one click.
+  const DATASETS = {
+    karman_vortex: {
+      label: 'Karman Vortex',
+      card: "This shows fluid flowing past a blunt object like a cylinder. Behind the object, the flow can't stay smooth, so it breaks into two rows of spinning vortices that peel off alternately from each side and drift downstream, which is the repeating “street” the dataset is named after. Then, the wake settles into a steady back-and-forth rhythm as vortices shed one after another.",
+      presets: [
+        {
+          id: 'setup_a',
+          label: 'Setup A — high Re',
+          values: { niu: 0.021, re: 76.19, cx: 27, cy: 58, r: 8 },
+          desc: 'Higher Reynolds number = less viscous, more energetic flow. Vortices shed faster and stay sharper/more defined downstream.'
+        },
+        {
+          id: 'setup_b',
+          label: 'Setup B — high viscosity',
+          values: { niu: 0.023, re: 69.57, cx: 30, cy: 64, r: 8 },
+          desc: 'Higher viscosity, lower Re = calmer flow. Vortices are a bit more damped, cylinder sits slightly higher and further right (cx/cy shifted).'
+        }
+      ]
+    }
+  };
+
+  const paramFields = el('paramFields');
+  const cardBody = el('cardBody');
+  const datasetSelect = el('dataset');
+
+  function updatePresetInfo(ds){
+    const presetSelect = el('preset');
+    if (!presetSelect) return;
+    const preset = ds.presets.find(p => p.id === presetSelect.value) || ds.presets[0];
+    const v = preset.values;
+    el('presetValues').textContent =
+      `ν=${v.niu} · Re=${v.re} · cx=${v.cx} · cy=${v.cy} · r=${v.r}`;
+    el('presetDesc').textContent = preset.desc;
+  }
+
+  function renderParams(key){
+    paramFields.innerHTML = '';
+    const ds = DATASETS[key];
+    if (!ds || !ds.presets || !ds.presets.length) return;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'field';
+    wrap.innerHTML = `
+      <label for="preset">Setup</label>
+      <select id="preset">
+        ${ds.presets.map(p => `<option value="${p.id}">${p.label}</option>`).join('')}
+      </select>
+      <p class="hint" id="presetValues"></p>
+      <p class="preset-desc" id="presetDesc"></p>
+    `;
+    paramFields.appendChild(wrap);
+
+    el('preset').addEventListener('change', () => updatePresetInfo(ds));
+    updatePresetInfo(ds);
+  }
+
+  datasetSelect.addEventListener('change', () => {
+    const ds = DATASETS[datasetSelect.value];
+    cardBody.textContent = ds ? ds.card : 'Dataset details will appear here once the dataset options are finalized.';
+    renderParams(datasetSelect.value);
+  });
+
   const seedInput = el('seed');
   const generateBtn = el('generateBtn');
   const sIdle = el('s-idle');
@@ -346,12 +467,98 @@
   const statusTime = el('statusTime');
   const viewerStage = el('viewerStage');
   const viewerMsg = el('viewerMsg');
+  const playTriangle = el('playTriangle');
   const frameBadge = el('frameBadge');
   const timeline = el('timeline');
   const frameReadout = el('frameReadout');
+  const clearBtn = el('clearBtn');
+  const videoPlayer = el('videoPlayer');
 
   let runStart = null;
   let timerHandle = null;
+  let scrubbing = false;
+  let lastObjectUrl = null;
+
+  function formatTime(sec){
+    const m = Math.floor(sec / 60);
+    const s = (sec % 60).toFixed(1).padStart(4, '0');
+    return m + ':' + s;
+  }
+
+  // Loads a video into the viewer from any playable URL. Once a backend
+  // exists, replace the file-picker flow below with a call to this function
+  // using the URL the backend returns for the generated video.
+  function loadVideo(url){
+    playTriangle.style.display = 'none';
+    viewerMsg.style.display = 'none';
+    videoPlayer.style.display = 'block';
+    videoPlayer.src = url;
+    videoPlayer.load();
+  }
+
+  // Resets the viewer to its empty state and releases any local blob URL
+  // we created for an attached file, so the timeline never shows stale
+  // frames from a previous video.
+  function clearVideo(){
+    videoPlayer.pause();
+    if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
+    lastObjectUrl = null;
+    videoPlayer.removeAttribute('src');
+    videoPlayer.load();
+    videoPlayer.style.display = 'none';
+    playTriangle.style.display = 'block';
+    viewerMsg.style.display = 'block';
+    frameBadge.style.display = 'none';
+    timeline.value = 0;
+    timeline.max = 0;
+    timeline.disabled = true;
+    frameReadout.textContent = formatTime(0);
+    clearBtn.disabled = true;
+  }
+
+  videoPlayer.addEventListener('loadedmetadata', () => {
+    stopTimer();
+    setStatus('finished');
+    generateBtn.disabled = false;
+    clearBtn.disabled = false;
+    timeline.min = 0;
+    timeline.max = videoPlayer.duration || 0;
+    timeline.step = 0.01;
+    timeline.value = 0;
+    timeline.disabled = false;
+    frameBadge.style.display = 'inline-block';
+    frameBadge.textContent = formatTime(0) + ' / ' + formatTime(videoPlayer.duration || 0);
+    frameReadout.textContent = formatTime(0);
+  });
+
+  videoPlayer.addEventListener('error', () => {
+    if (!videoPlayer.src) return;
+    stopTimer();
+    setStatus('idle');
+    generateBtn.disabled = false;
+    clearVideo();
+    viewerMsg.textContent = 'Could not load that file — try another video.';
+  });
+
+  videoPlayer.addEventListener('timeupdate', () => {
+    if (scrubbing) return;
+    timeline.value = videoPlayer.currentTime;
+    frameReadout.textContent = formatTime(videoPlayer.currentTime);
+    frameBadge.textContent = formatTime(videoPlayer.currentTime) + ' / ' + formatTime(videoPlayer.duration || 0);
+  });
+
+  videoPlayer.addEventListener('click', () => {
+    if (videoPlayer.paused) videoPlayer.play();
+    else videoPlayer.pause();
+  });
+
+  clearBtn.addEventListener('click', () => {
+    stopTimer();
+    clearVideo();
+    setStatus('idle');
+    statusTime.textContent = '';
+    viewerMsg.textContent = 'Video Viewer';
+  });
 
   function clampSeed(){
     let v = parseInt(seedInput.value.replace(/[^0-9]/g, ''), 10);
@@ -388,8 +595,8 @@
     seedInput.disabled = true;
     setStatus('running');
     startTimer();
+    clearVideo();
     viewerMsg.textContent = 'Generating…';
-    frameBadge.style.display = 'none';
 
     const fakeLatency = 1500 + Math.random() * 800;
     setTimeout(() => {
@@ -398,23 +605,19 @@
       generateBtn.disabled = false;
       generateBtn.textContent = 'Generate';
       seedInput.disabled = false;
-
-      viewerMsg.textContent = 'Video Viewer';
-      frameBadge.style.display = 'inline-block';
-      frameBadge.textContent = 'frame 0 / ' + (NUM_FRAMES - 1);
-
-      timeline.max = NUM_FRAMES - 1;
-      timeline.value = 0;
-      timeline.disabled = false;
-      frameReadout.textContent = 'frame 0';
+      viewerMsg.textContent = 'Generated video will appear here';
     }, fakeLatency);
   });
 
   timeline.addEventListener('input', () => {
-    const idx = timeline.value;
-    frameReadout.textContent = 'frame ' + idx;
-    frameBadge.textContent = 'frame ' + idx + ' / ' + (NUM_FRAMES - 1);
+    if (!videoPlayer.src) return;
+    scrubbing = true;
+    const t = parseFloat(timeline.value);
+    videoPlayer.currentTime = t;
+    frameReadout.textContent = formatTime(t);
+    frameBadge.textContent = formatTime(t) + ' / ' + formatTime(videoPlayer.duration || 0);
   });
+  timeline.addEventListener('change', () => { scrubbing = false; });
 </script>
 
 </body>
