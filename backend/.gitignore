@@ -1,0 +1,8 @@
+main_env311/
+p/
+*.pt
+output/
+data_generation/tucker_ouput/
+data_tucker/tucker_dir/
+*.mp4
+*.gif
