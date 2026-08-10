@@ -260,6 +260,38 @@
 
   .timeline-block{
     margin-top: 16px;
+    position: relative;
+  }
+
+  /* YouTube-style hover-scrub thumbnail. Absolutely positioned inside
+     .timeline-block; its left offset tracks the cursor along the range. */
+  .preview-tip{
+    position: absolute;
+    bottom: 26px;
+    transform: translateX(-50%);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 4px;
+    background: var(--panel);
+    border: 1.5px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.15);
+    pointer-events: none;
+    z-index: 6;
+  }
+  .preview-tip canvas{
+    display: block;
+    width: 160px;
+    height: 90px;
+    background: #000;
+    border-radius: 3px;
+  }
+  .preview-tip .preview-tip-time{
+    font-family: "Courier New", Courier, monospace;
+    font-size: 11px;
+    color: var(--ink);
   }
   .timeline-head{
     display: flex;
@@ -333,7 +365,7 @@
         <div class="field">
           <label for="seed">Seed</label>
           <input type="text" id="seed" inputmode="numeric" value="8" maxlength="3">
-          <p class="hint">0–999</p>
+          <p class="hint">1–999</p>
         </div>
 
         <div class="field" id="paramFields"></div>
@@ -370,7 +402,15 @@
           <span class="frame-badge" id="frameBadge" style="display:none;"></span>
         </div>
 
+        <!-- Off-screen video used only to render hover-scrub thumbnails so
+             seeking never disturbs the main player's playback position. -->
+        <video id="previewVideo" muted playsinline preload="auto" style="display:none;"></video>
+
         <div class="timeline-block">
+          <div class="preview-tip" id="previewTip">
+            <canvas id="previewCanvas" width="160" height="90"></canvas>
+            <span class="preview-tip-time" id="previewTipTime">0:00.0</span>
+          </div>
           <div class="timeline-head">
             <span class="t-label">Timeline</span>
             <span class="t-frame" id="frameReadout">frame 0</span>
@@ -473,11 +513,18 @@
   const frameReadout = el('frameReadout');
   const clearBtn = el('clearBtn');
   const videoPlayer = el('videoPlayer');
+  const previewVideo = el('previewVideo');
+  const previewTip = el('previewTip');
+  const previewCanvas = el('previewCanvas');
+  const previewTipTime = el('previewTipTime');
+  const previewCtx = previewCanvas.getContext('2d');
 
   let runStart = null;
   let timerHandle = null;
   let scrubbing = false;
   let lastObjectUrl = null;
+  let previewSeeking = false;   // a seek on previewVideo is in flight
+  let previewPending = null;    // newest requested time while seeking
 
   function formatTime(sec){
     const m = Math.floor(sec / 60);
@@ -494,6 +541,9 @@
     videoPlayer.style.display = 'block';
     videoPlayer.src = url;
     videoPlayer.load();
+    // Mirror the source onto the hidden scrubber so hover thumbnails work.
+    previewVideo.src = url;
+    previewVideo.load();
   }
 
   // Resets the viewer to its empty state and releases any local blob URL
@@ -514,6 +564,11 @@
     timeline.disabled = true;
     frameReadout.textContent = formatTime(0);
     clearBtn.disabled = true;
+    hidePreviewTip();
+    previewVideo.removeAttribute('src');
+    previewVideo.load();
+    previewSeeking = false;
+    previewPending = null;
   }
 
   videoPlayer.addEventListener('loadedmetadata', () => {
@@ -562,8 +617,8 @@
 
   function clampSeed(){
     let v = parseInt(seedInput.value.replace(/[^0-9]/g, ''), 10);
-    if (isNaN(v)) v = 0;
-    v = Math.max(0, Math.min(999, v));
+    if (isNaN(v)) v = 1;
+    v = Math.max(1, Math.min(999, v));
     seedInput.value = v;
     return v;
   }
@@ -588,8 +643,94 @@
   }
   function stopTimer(){ clearInterval(timerHandle); }
 
-  generateBtn.addEventListener('click', () => {
-    clampSeed();
+  // --- Backend wiring --------------------------------------------------
+  // The API is served from this same origin (FastAPI hands out this page),
+  // so relative URLs are all we need and CORS never comes into it.
+
+  // The <option> values are DOM-friendly slugs; the API wants the real
+  // dataset name from its whitelist. Keep the translation in one place.
+  const DATASET_API_NAME = { karman_vortex: 'karman vortex street' };
+
+  // Preset ids -> the setup letter the API expects. This is what actually
+  // changes which of the 100 real samples gets rendered (block A = ids
+  // 0-49, block B = ids 50-99); seed then picks the id inside that block.
+  const PRESET_TO_SETUP = { setup_a: 'A', setup_b: 'B' };
+
+  const POLL_MS = 1000;
+  let pollHandle = null;
+  let currentJobId = null;
+
+  function endRun(){
+    stopTimer();
+    if (pollHandle){ clearInterval(pollHandle); pollHandle = null; }
+    generateBtn.disabled = false;
+    generateBtn.textContent = 'Generate';
+    seedInput.disabled = false;
+  }
+
+  function failRun(message){
+    endRun();
+    setStatus('idle');
+    viewerMsg.style.display = 'block';
+    viewerMsg.textContent = message;
+  }
+
+  // Generation takes minutes, so /generate returns immediately and we ask
+  // /status how it's going until it stops saying "running". job_id is sent
+  // on every poll so a stale request (e.g. a leftover timer from a job that
+  // already finished) can't be confused with the run actually in flight.
+  async function pollStatus(){
+    let state;
+    try {
+      const res = await fetch('/status?job_id=' + encodeURIComponent(currentJobId));
+      if (res.status === 404){ failRun('This job is no longer tracked by the server.'); return; }
+      if (!res.ok) throw new Error('status ' + res.status);
+      state = await res.json();
+    } catch (err) {
+      failRun('Lost contact with the server: ' + err.message);
+      return;
+    }
+
+    if (state.state === 'finished'){
+      endRun();
+      setStatus('finished');
+      // prefer the server's measured time over the browser's stopwatch
+      if (state.time != null) statusTime.textContent = state.time.toFixed(1) + 's';
+      try {
+        const res = await fetch('/result?job_id=' + encodeURIComponent(currentJobId));
+        if (!res.ok) throw new Error('result ' + res.status);
+        const payload = await res.json();
+        loadVideo(payload.url);
+        clearBtn.disabled = false;
+      } catch (err) {
+        failRun('Finished, but the video could not be loaded: ' + err.message);
+      }
+    } else if (state.state === 'failed'){
+      failRun('Generation failed: ' + (state.errormessage || 'unknown error'));
+    }
+  }
+
+  generateBtn.addEventListener('click', async () => {
+    const datasetKey = datasetSelect.value;
+    if (!DATASET_API_NAME[datasetKey]){
+      viewerMsg.style.display = 'block';
+      viewerMsg.textContent = 'Pick a dataset first.';
+      return;
+    }
+
+    const seed = clampSeed();
+    const dataset = DATASETS[datasetKey];
+    const presetSelect = el('preset');
+    const preset =
+      dataset.presets.find(p => p.id === (presetSelect && presetSelect.value)) ||
+      dataset.presets[0];
+    const setup = PRESET_TO_SETUP[preset.id];
+    if (!setup){
+      viewerMsg.style.display = 'block';
+      viewerMsg.textContent = 'Unknown preset — cannot map to a setup.';
+      return;
+    }
+
     generateBtn.disabled = true;
     generateBtn.textContent = 'Running…';
     seedInput.disabled = true;
@@ -598,15 +739,45 @@
     clearVideo();
     viewerMsg.textContent = 'Generating…';
 
-    const fakeLatency = 1500 + Math.random() * 800;
-    setTimeout(() => {
-      stopTimer();
-      setStatus('finished');
-      generateBtn.disabled = false;
-      generateBtn.textContent = 'Generate';
-      seedInput.disabled = false;
-      viewerMsg.textContent = 'Generated video will appear here';
-    }, fakeLatency);
+    let res;
+    try {
+      res = await fetch('/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset: DATASET_API_NAME[datasetKey],
+          seed: seed,
+          setup: setup,
+          niu: preset.values.niu,
+          re:  preset.values.re,
+          cx:  preset.values.cx,
+          cy:  preset.values.cy,
+          r:   preset.values.r
+        })
+      });
+    } catch (err) {
+      failRun('Could not reach the server. Is the API running?');
+      return;
+    }
+
+    // 409 is the one-job-at-a-time rule talking, not a crash.
+    if (res.status === 409){
+      failRun('A job is already running on the GPU. Wait for it to finish.');
+      return;
+    }
+    if (!res.ok){
+      let detail = 'HTTP ' + res.status;
+      try {
+        const body = await res.json();
+        if (body.detail) detail = JSON.stringify(body.detail);
+      } catch (err) { /* non-JSON error body; keep the status code */ }
+      failRun('Request rejected: ' + detail);
+      return;
+    }
+
+    const started = await res.json();
+    currentJobId = started.job_id;
+    pollHandle = setInterval(pollStatus, POLL_MS);
   });
 
   timeline.addEventListener('input', () => {
@@ -618,6 +789,69 @@
     frameBadge.textContent = formatTime(t) + ' / ' + formatTime(videoPlayer.duration || 0);
   });
   timeline.addEventListener('change', () => { scrubbing = false; });
+
+  // --- Hover-scrub thumbnail (YouTube-style) ---------------------------
+  function hidePreviewTip(){ previewTip.style.display = 'none'; }
+
+  // Draws whatever frame previewVideo is currently parked on into the
+  // tooltip canvas, letterboxed to preserve the video's aspect ratio.
+  function drawPreviewFrame(){
+    const cw = previewCanvas.width, ch = previewCanvas.height;
+    previewCtx.fillStyle = '#000';
+    previewCtx.fillRect(0, 0, cw, ch);
+    const vw = previewVideo.videoWidth, vh = previewVideo.videoHeight;
+    if (!vw || !vh) return;
+    const scale = Math.min(cw / vw, ch / vh);
+    const dw = vw * scale, dh = vh * scale;
+    try {
+      previewCtx.drawImage(previewVideo, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+    } catch (err) {
+      /* frame not decodable yet — leave the black fill */
+    }
+  }
+
+  // Seeks previewVideo to t. Seeking is async, so if the cursor moves again
+  // mid-seek we stash only the newest target and jump to it once settled.
+  function requestPreviewFrame(t){
+    if (previewSeeking){ previewPending = t; return; }
+    previewSeeking = true;
+    try { previewVideo.currentTime = t; }
+    catch (err) { previewSeeking = false; }
+  }
+
+  previewVideo.addEventListener('seeked', () => {
+    drawPreviewFrame();
+    previewSeeking = false;
+    if (previewPending != null){
+      const next = previewPending;
+      previewPending = null;
+      requestPreviewFrame(next);
+    }
+  });
+
+  function onTimelineHover(e){
+    const dur = videoPlayer.duration;
+    if (!videoPlayer.src || !dur || isNaN(dur)){ hidePreviewTip(); return; }
+    const rect = timeline.getBoundingClientRect();
+    if (!rect.width){ hidePreviewTip(); return; }
+    let frac = (e.clientX - rect.left) / rect.width;
+    frac = Math.max(0, Math.min(1, frac));
+    const t = frac * dur;
+
+    // Keep the tooltip fully inside the timeline's width.
+    const tipW = previewTip.offsetWidth || 168;
+    const half = tipW / 2;
+    let left = frac * rect.width;
+    left = Math.max(half, Math.min(rect.width - half, left));
+    previewTip.style.left = left + 'px';
+    previewTipTime.textContent = formatTime(t);
+    previewTip.style.display = 'flex';
+    requestPreviewFrame(t);
+  }
+
+  timeline.addEventListener('mouseenter', onTimelineHover);
+  timeline.addEventListener('mousemove', onTimelineHover);
+  timeline.addEventListener('mouseleave', hidePreviewTip);
 </script>
 
 </body>
