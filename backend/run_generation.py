@@ -1,88 +1,247 @@
-import subprocess
+import fcntl
+import logging
 import os
+import subprocess
+import time
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 DIFFATS_ROOT = os.environ.get("DIFFATS_ROOT", os.path.expanduser("~/DiffATS"))
-CHECKPOINT_PATH = os.environ.get("DIFFATS_CHECKPOINT", "")
+CHECKPOINT_PATH = os.environ.get(
+    "DIFFATS_CHECKPOINT",
+    "/shared/checkpoints/karman_vortex_2d_epoch00500_step0156000.pt",
+)
+
+BACKEND_DIR = os.path.expanduser("~/backend")
 
 DATASETS = {
     "karman vortex street": {
         "generate_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/exp_karman_vortex/generate",
-        "tucker_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/exp_karman_vortex/data_tucker/tucker_dir",
+        # instructor_test: 100 real samples, two setups of 50
+        # (Setup A = ids 0-49, Setup B = ids 50-99).
+        "tucker_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/exp_karman_vortex/data_tucker/instructor_test",
         "tools_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/tools",
-        "viz_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/visualization",
-        "gt_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/exp_karman_vortex/data_generation/tucker_ouput",
+        "viz_dir": BACKEND_DIR,
+        "gt_dir": f"{DIFFATS_ROOT}/exps/tensor_physics/exp_karman_vortex/generate/output_instructor_test/gt_shards",
         "checkpoint": CHECKPOINT_PATH,
         "epoch_tag": "epoch00500",
         "epoch": 500,
+        "batch_size": 50,
+        "sample_steps": 250,
+        "device": "cuda:0",
     }
 }
 
-MAIN_PY = os.path.expanduser("~/main_env311/bin/python3.11")
+MAIN_PY = os.path.expanduser("~/diffats_env/bin/python3")
 
-def run_generation(dataset: str, seed: int) -> dict:
+LOG_DIR = Path(BACKEND_DIR) / "logs"
+LOCK_PATH = Path(BACKEND_DIR) / ".gpu.lock"
+
+
+class BusyError(RuntimeError):
+    pass
+
+
+class StageError(RuntimeError):
+    def __init__(self, stage, returncode, log_path, tail):
+        self.stage = stage
+        self.returncode = returncode
+        self.log_path = str(log_path)
+        self.tail = tail
+        super().__init__(
+            f"stage '{stage}' failed with exit code {returncode}. "
+            f"Full log: {log_path}\n--- last lines of {stage} ---\n{tail}"
+        )
+
+
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger("diffats.run_generation")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _fmt = logging.Formatter(
+        "%(asctime)s  %(levelname)-7s  %(message)s", "%Y-%m-%d %H:%M:%S"
+    )
+    _fh = logging.FileHandler(LOG_DIR / "run_generation.log")
+    _fh.setFormatter(_fmt)
+    logger.addHandler(_fh)
+    _sh = logging.StreamHandler()
+    _sh.setFormatter(_fmt)
+    logger.addHandler(_sh)
+
+
+def _tail(path, n=40):
+    try:
+        with open(path, "r", errors="replace") as fh:
+            return "".join(fh.readlines()[-n:]).rstrip()
+    except OSError as exc:
+        return f"(could not read {path}: {exc})"
+
+
+@contextmanager
+def _single_job():
+    handle = open(LOCK_PATH, "w")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            raise BusyError(
+                f"a generation job is already running (GPU lock held: {LOCK_PATH})"
+            )
+        handle.write(f"pid={os.getpid()} started={datetime.now().isoformat()}\n")
+        handle.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
+def _run_stage(name, argv, cwd, log_path):
+    logger.info("stage %-11s starting", name)
+    started = time.time()
+
+    with open(log_path, "a") as log_file:
+        log_file.write(f"\n===== stage {name} @ {datetime.now().isoformat()} =====\n")
+        log_file.write("$ " + " ".join(argv) + "\n")
+        log_file.flush()
+        proc = subprocess.run(argv, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT)
+
+    elapsed = time.time() - started
+
+    if proc.returncode != 0:
+        tail = _tail(log_path)
+        logger.error(
+            "stage %-11s FAILED after %.1fs (exit %d)\n%s",
+            name, elapsed, proc.returncode, tail,
+        )
+        raise StageError(name, proc.returncode, log_path, tail)
+
+    logger.info("stage %-11s ok in %.1fs", name, elapsed)
+    return elapsed
+
+
+def run_generation(dataset: str, seed: int, sample_idx: int | None = None) -> dict:
+    """sample_idx, if given, picks which of the 100 real test samples gets
+    rendered (0-99). Left unset, the renderer falls back to its own fixed
+    pick. seed always controls the diffusion sampling noise, independent of
+    which sample is shown."""
     if dataset not in DATASETS:
-        raise ValueError(f"Unknown dataset: {dataset}")
-    if not isinstance(seed, int) or not (0 <= seed <= 999):
-        raise ValueError(f"Seed out of range: {seed}")
+        raise ValueError(f"Unknown dataset: {dataset!r}")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError(f"Seed must be an integer, got {type(seed).__name__}: {seed!r}")
+    if not (0 <= seed <= 999):
+        raise ValueError(f"Seed out of range [0, 999]: {seed}")
+    if sample_idx is not None:
+        if isinstance(sample_idx, bool) or not isinstance(sample_idx, int):
+            raise ValueError(f"sample_idx must be an integer: {sample_idx!r}")
+        if not (0 <= sample_idx <= 99):
+            raise ValueError(f"sample_idx out of range [0, 99]: {sample_idx}")
 
     cfg = DATASETS[dataset]
     output_dir = Path(cfg["generate_dir"]) / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # inference
-    subprocess.run(
-        [
-            MAIN_PY, "gen_karman_2d.py",
-            "--ckpt", cfg["checkpoint"],
-            "--output_dir", str(output_dir),
-            "--train_data_dir", cfg["tucker_dir"],
-            "--test_data_dir", f"{cfg['tucker_dir']}/test_data",
-            "--batch_size", "50",
-            "--seeds", str(seed),
-            "--sample_steps", "250",
-            "--epoch_tag", cfg["epoch_tag"],
-            "--device", "cuda:0",
-        ],
-        cwd=cfg["generate_dir"], check=True,
-    )
-    factors_path = output_dir / f"{cfg['epoch_tag']}_seed{seed}.pt"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = LOG_DIR / f"seed{seed}_{stamp}.log"
+    timings = {}
 
-    # reconstruct
-    subprocess.run(
-        [
-            MAIN_PY, "reconstruct_gen.py",
-            "--exp", "karman",
-            "--seed", str(seed),
-            "--epoch", str(cfg["epoch"]),
-            "--dir", str(output_dir),
-        ],
-        cwd=cfg["tools_dir"], check=True,
-    )
-    videos_path = output_dir / f"{cfg['epoch_tag']}_seed{seed}_videos.pt"
+    with _single_job():
+        job_started = time.time()
+        logger.info(
+            "job start   dataset=%r seed=%d steps=%d batch=%d log=%s",
+            dataset, seed, cfg["sample_steps"], cfg["batch_size"], log_path,
+        )
 
-    # render
-    video_out_dir = output_dir / "videos"
-    subprocess.run(
-        [
-            MAIN_PY, "making_videos_api.py",
-            "--gen_path", str(videos_path),
-            "--gt_dir", cfg["gt_dir"],
-            "--out_dir", str(video_out_dir),
-        ],
-        cwd=cfg["viz_dir"], check=True,
-    )
+        try:
+            # inference
+            timings["inference"] = _run_stage(
+                "inference",
+                [
+                    MAIN_PY, "gen_karman_2d.py",
+                    "--ckpt", cfg["checkpoint"],
+                    "--output_dir", str(output_dir),
+                    "--train_data_dir", cfg["tucker_dir"],
+                    "--test_data_dir", cfg["tucker_dir"],
+                    "--batch_size", str(cfg["batch_size"]),
+                    "--seeds", str(seed),
+                    "--sample_steps", str(cfg["sample_steps"]),
+                    "--epoch_tag", cfg["epoch_tag"],
+                    "--device", cfg["device"],
+                ],
+                cwd=cfg["generate_dir"],
+                log_path=log_path,
+            )
+            factors_path = output_dir / f"{cfg['epoch_tag']}_seed{seed}.pt"
 
-    result_video = video_out_dir / "karman_vortex_gt_vs_gen_redblue.mp4"
-    if not result_video.exists():
-        raise RuntimeError("Pipeline finished but expected output was not found")
+            # reconstruct
+            timings["reconstruct"] = _run_stage(
+                "reconstruct",
+                [
+                    MAIN_PY, "reconstruct_gen.py",
+                    "--exp", "karman",
+                    "--seed", str(seed),
+                    "--epoch", str(cfg["epoch"]),
+                    "--dir", str(output_dir),
+                ],
+                cwd=cfg["tools_dir"],
+                log_path=log_path,
+            )
+            videos_path = output_dir / f"{cfg['epoch_tag']}_seed{seed}_videos.pt"
+
+            # render
+            tag = f"seed{seed}" if sample_idx is None else f"seed{seed}_id{sample_idx}"
+            video_out_dir = output_dir / "videos" / tag
+            render_argv = [
+                MAIN_PY, "making_videos_api.py",
+                "--gen_path", str(videos_path),
+                "--gt_dir", cfg["gt_dir"],
+                "--out_dir", str(video_out_dir),
+            ]
+            if sample_idx is not None:
+                render_argv += ["--sample_idx", str(sample_idx)]
+            timings["render"] = _run_stage(
+                "render", render_argv, cwd=cfg["viz_dir"], log_path=log_path,
+            )
+
+            result_video = video_out_dir / "karman_vortex_gt_vs_gen_redblue.mp4"
+            if not result_video.exists():
+                raise RuntimeError(
+                    f"Pipeline finished but expected output is missing: {result_video}"
+                )
+
+        except Exception as exc:
+            logger.exception(
+                "job FAILED   dataset=%r seed=%d after %.1fs: %s",
+                dataset, seed, time.time() - job_started, exc,
+            )
+            raise
+
+        timings["total"] = time.time() - job_started
+        logger.info(
+            "job ok       dataset=%r seed=%d in %.1fs "
+            "(inference %.1fs, reconstruct %.1fs, render %.1fs) -> %s",
+            dataset, seed, timings["total"],
+            timings["inference"], timings["reconstruct"], timings["render"],
+            result_video,
+        )
 
     return {
+        "dataset": dataset,
+        "seed": seed,
         "factors_path": str(factors_path),
         "reconstructed_path": str(videos_path),
         "video_path": str(result_video),
+        "timings": timings,
+        "log_path": str(log_path),
     }
 
+
 if __name__ == "__main__":
-    result = run_generation("karman vortex street", 0)
-    print(result)
+    import sys
+
+    seed_arg = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    print(run_generation("karman vortex street", seed_arg))
