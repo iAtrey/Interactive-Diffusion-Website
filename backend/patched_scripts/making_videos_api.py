@@ -1,7 +1,6 @@
-import matplotlib as mpl
 """
 making_videos.py — side-by-side comparison of ground truth vs. generated
-Karman-vortex 2D vorticity for one randomly selected test sample.
+Karman-vortex 2D vorticity for one test sample.
 
   Left  panel : ground truth   (test_shard_*.pt)
   Right panel : our-method generation (epoch00500_seed0_videos.pt)
@@ -17,17 +16,6 @@ Two style variants are produced in a single run:
                  no top title, larger panel titles and bottom info text,
                  typeset in Nimbus Sans (the URW open-source equivalent of
                  Helvetica, metrically compatible).
-
-Outputs (in /home/x-jlyu5/jinhua/factor_diffusion/tensor_physics/output/):
-    karman_vortex_gt_vs_gen.gif
-    karman_vortex_gt_vs_gen.mp4
-    karman_vortex_gt_vs_gen_redblue.gif
-    karman_vortex_gt_vs_gen_redblue.mp4
-
-Run:
-    module load ffmpeg/4.2.2
-    /anvil/projects/x-eng260004/factor_diffusion/diffusion_env/bin/python \
-        /home/x-jlyu5/jinhua/factor_diffusion/tensor_physics/visualization/making_videos.py
 """
 
 import os
@@ -38,6 +26,7 @@ import sys
 
 import numpy as np
 import torch
+import matplotlib as mpl
 import matplotlib.cm as mcm
 import matplotlib.colors as mcolors
 from PIL import Image, ImageDraw, ImageFont
@@ -51,6 +40,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--gen_path", required=True)
 parser.add_argument("--gt_dir", required=True)
 parser.add_argument("--out_dir", required=True)
+# If given, render this exact sample instead of picking one at random. This is
+# what lets a caller (run_generation.py) choose a specific, hyperspecific
+# sample rather than getting whatever random.Random(SEED) happens to land on.
+parser.add_argument("--sample_idx", type=int, default=None)
 args = parser.parse_args()
 
 GEN_PATH = args.gen_path
@@ -61,7 +54,9 @@ SEED              = 0
 FPS               = 20
 CONDITION_SECONDS = 3.0
 N_ANIM_FRAMES     = 200
-SAMPLES_PER_SHARD = 10
+# Instructor test set: 100 samples across two 50-sample shards
+# (test_shard_000.pt = Setup A ids 0-49, test_shard_001.pt = Setup B ids 50-99).
+SAMPLES_PER_SHARD = 50
 
 # ---------------------------------------------------------------------------
 # Colormaps
@@ -93,7 +88,7 @@ def apply_lut(data: np.ndarray, lut: np.ndarray, vmin: float, vmax: float) -> np
 
 
 def vor_to_image(vor_frame: np.ndarray, lut: np.ndarray,
-                 vmin: float, vmax: float) -> Image.Image:
+                  vmin: float, vmax: float) -> Image.Image:
     """Same orientation as exp_karman_vortex/tucker_karman_demo.py."""
     rgba = apply_lut(vor_frame.T[::-1], lut, vmin, vmax)
     return Image.fromarray(rgba, mode="RGBA").transpose(Image.Transpose.ROTATE_270)
@@ -108,11 +103,19 @@ videos = gen["videos"]
 N = videos.shape[0]
 print(f"  videos shape: {tuple(videos.shape)}")
 
-rng = random.Random(SEED)
-idx = rng.randrange(N)
+if args.sample_idx is not None:
+    if not (0 <= args.sample_idx < N):
+        sys.exit(f"ERROR: --sample_idx {args.sample_idx} out of range [0, {N - 1}]")
+    idx = args.sample_idx
+    print(f"\nUsing requested sample idx = {idx}")
+else:
+    rng = random.Random(SEED)
+    idx = rng.randrange(N)
+    print(f"\nPicked random sample idx = {idx}")
+
 shard_id = idx // SAMPLES_PER_SHARD
 in_shard = idx %  SAMPLES_PER_SHARD
-print(f"\nPicked sample idx = {idx}  ->  test_shard_{shard_id:03d}.pt[{in_shard}]")
+print(f"  ->  test_shard_{shard_id:03d}.pt[{in_shard}]")
 
 gt_path = os.path.join(GT_DIR, f"test_shard_{shard_id:03d}.pt")
 print(f"Loading ground truth:\n  {gt_path}")
@@ -293,7 +296,6 @@ def render_frame(style, gt_frame, gen_frame, frame_label, condition):
 
     return canvas.convert("RGB")
 
-
 # ---------------------------------------------------------------------------
 # Encoding helpers
 # ---------------------------------------------------------------------------
@@ -336,7 +338,6 @@ def save_mp4(frames, path: str, fps: int, ffmpeg_bin: str):
     proc.stdin.close()
     if proc.wait() != 0:
         sys.exit(f"ffmpeg exited non-zero while writing {path}")
-
 
 # ---------------------------------------------------------------------------
 # Build and save each style
