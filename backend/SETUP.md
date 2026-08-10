@@ -66,9 +66,9 @@ Python version. That environment is unrelated to serving videos.
 - Confirm a GPU is visible: `nvidia-smi -L`.
 - If you're regenerating raw data, check `generate_data.py`'s hardcoded GPU
   index matches: `grep CUDA_VISIBLE_DEVICES generate_data.py`. Ignore its
-  "Using GPU (device 4)" print line — that's a hardcoded label, not the real
-  device.
-- Confirm `ffmpeg` is on `PATH` (`which ffmpeg`) — the renderer needs it and
+  "Using GPU (device 4)" print line. The output is hardcoded.
+  
+- Confirm `ffmpeg` is on `PATH` (`which ffmpeg`): the renderer needs it and
   fails with a clear message if it's missing.
 
 ## Which data the pipeline uses
