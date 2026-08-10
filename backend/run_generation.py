@@ -13,7 +13,7 @@ CHECKPOINT_PATH = os.environ.get(
     "/shared/checkpoints/karman_vortex_2d_epoch00500_step0156000.pt",
 )
 
-BACKEND_DIR = os.path.expanduser("~/backend")
+BACKEND_DIR = os.environ.get("DIFFATS_BACKEND", os.path.expanduser("~/backend"))
 
 DATASETS = {
     "karman vortex street": {
@@ -33,7 +33,9 @@ DATASETS = {
     }
 }
 
-MAIN_PY = os.path.expanduser("~/diffats_env/bin/python3")
+MAIN_PY = os.environ.get(
+    "DIFFATS_PYTHON", os.path.expanduser("~/diffats_env/bin/python3")
+)
 
 LOG_DIR = Path(BACKEND_DIR) / "logs"
 LOCK_PATH = Path(BACKEND_DIR) / ".gpu.lock"
