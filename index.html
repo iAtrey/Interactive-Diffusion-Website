@@ -241,6 +241,55 @@
     border-left: 30px solid var(--gray-light);
     margin-left: 8px;
   }
+
+  /* Shown over the video whenever it's paused, so the play/pause state is
+     always obvious at a glance. pointer-events:none so clicks still reach
+     the <video> underneath, which toggles playback. */
+  .pause-overlay{
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 4;
+  }
+  .pause-overlay.show{ display: flex; }
+  .pause-overlay .glyph{
+    width: 62px; height: 62px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.55);
+    border: 2px solid rgba(255,255,255,0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pause-overlay .glyph::before{
+    content: '';
+    width: 0; height: 0;
+    border-top: 13px solid transparent;
+    border-bottom: 13px solid transparent;
+    border-left: 21px solid #fff;
+    margin-left: 6px;
+  }
+
+  /* Small always-visible text state next to the timeline. */
+  .play-state{
+    font-family: "Courier New", Courier, monospace;
+    font-size: 12px;
+    padding: 1px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--gray);
+  }
+  .play-state.playing{
+    color: var(--finished);
+    border-color: var(--finished);
+  }
+  .play-state.scrubbing{
+    color: var(--orange);
+    border-color: var(--orange);
+  }
   .viewer-stage .msg{
     font-family: "Courier New", Courier, monospace;
     font-size: 13px;
@@ -362,6 +411,15 @@
           </select>
         </div>
 
+        <div class="field" id="modeField" style="display:none;">
+          <label for="mode">Test set</label>
+          <select id="mode">
+            <option value="quick">Quick — 15 clips (~3 min)</option>
+            <option value="full" selected>Full — 100 clips (~20 min)</option>
+          </select>
+          <p class="preset-desc" id="modeDesc"></p>
+        </div>
+
         <div class="field">
           <label for="seed">Seed</label>
           <input type="text" id="seed" inputmode="numeric" value="8" maxlength="3">
@@ -399,6 +457,7 @@
           <video class="video-player" id="videoPlayer" style="display:none;" playsinline></video>
           <div class="play-triangle" id="playTriangle"></div>
           <div class="msg" id="viewerMsg">Video Viewer</div>
+          <div class="pause-overlay" id="pauseOverlay"><span class="glyph"></span></div>
           <span class="frame-badge" id="frameBadge" style="display:none;"></span>
         </div>
 
@@ -413,7 +472,10 @@
           </div>
           <div class="timeline-head">
             <span class="t-label">Timeline</span>
-            <span class="t-frame" id="frameReadout">frame 0</span>
+            <span>
+              <span class="play-state" id="playState">Paused</span>
+              <span class="t-frame" id="frameReadout">frame 0</span>
+            </span>
           </div>
           <input type="range" id="timeline" min="0" max="0" value="0" disabled>
         </div>
@@ -433,70 +495,130 @@
 <script>
   const el = (id) => document.getElementById(id);
 
-  // Per-dataset parameter *bundles*. Instead of exposing niu/Re/cx/cy/r as
-  // independently-editable fields, each dataset offers a handful of presets
-  // — fixed combinations spaced across the full range seen in that dataset's
-  // test set — so a specific, describable regime can be picked in one click.
+  // Each dataset offers two test sets to run against, and each test set has
+  // its OWN parameter groups — they're different data, so they genuinely have
+  // different setups. The quick set has three groups of 5; the full set has
+  // two groups of 50. Every number below is read off the real stored samples,
+  // not invented, so what the page claims matches what the video shows.
   const DATASETS = {
     karman_vortex: {
       label: 'Karman Vortex',
       card: "This shows fluid flowing past a blunt object like a cylinder. Behind the object, the flow can't stay smooth, so it breaks into two rows of spinning vortices that peel off alternately from each side and drift downstream, which is the repeating “street” the dataset is named after. Then, the wake settles into a steady back-and-forth rhythm as vortices shed one after another.",
-      presets: [
-        {
-          id: 'setup_a',
-          label: 'Setup A — high Re',
-          values: { niu: 0.021, re: 76.19, cx: 27, cy: 58, r: 8 },
-          desc: 'Higher Reynolds number = less viscous, more energetic flow. Vortices shed faster and stay sharper/more defined downstream.'
+      modes: {
+        quick: {
+          label: 'Quick — 15 clips (~3 min)',
+          desc: 'Fast run on the small 15-clip set. Good for checking things work. The wake is a bit softer and can show faint banding, because this set is aligned to its own reference rather than the one the model was trained against.',
+          presets: [
+            {
+              id: 'setup_a',
+              label: 'Setup A — Re 70',
+              values: { niu: 0.02, re: 70.0, cx: 26, cy: 56, r: 7 },
+              desc: 'Baseline: smaller cylinder (r=7) sitting low. Steady, regular vortex shedding.'
+            },
+            {
+              id: 'setup_b',
+              label: 'Setup B — Re 90, bigger cylinder',
+              values: { niu: 0.02, re: 90.0, cx: 26, cy: 56, r: 9 },
+              desc: 'Same position and viscosity, but a wider cylinder (r=9). More obstruction means a higher Reynolds number and a more energetic, wider wake.'
+            },
+            {
+              id: 'setup_c',
+              label: 'Setup C — Re 70, cylinder raised',
+              values: { niu: 0.02, re: 70.0, cx: 26, cy: 61, r: 7 },
+              desc: 'Same flow as Setup A, but the cylinder sits higher (cy=61). The wake forms nearer the upper wall, so the two rows are less symmetric.'
+            }
+          ]
         },
-        {
-          id: 'setup_b',
-          label: 'Setup B — high viscosity',
-          values: { niu: 0.023, re: 69.57, cx: 30, cy: 64, r: 8 },
-          desc: 'Higher viscosity, lower Re = calmer flow. Vortices are a bit more damped, cylinder sits slightly higher and further right (cx/cy shifted).'
+        full: {
+          label: 'Full — 100 clips (~20 min)',
+          desc: 'Full run on the 100-clip reference set. Takes about 20 minutes but gives the sharpest result, since this data is aligned to the same reference the model was trained on.',
+          presets: [
+            {
+              id: 'setup_a',
+              label: 'Setup A — high Re',
+              values: { niu: 0.021, re: 76.19, cx: 27, cy: 58, r: 8 },
+              desc: 'Higher Reynolds number = less viscous, more energetic flow. Vortices shed faster and stay sharper/more defined downstream.'
+            },
+            {
+              id: 'setup_b',
+              label: 'Setup B — high viscosity',
+              values: { niu: 0.023, re: 69.57, cx: 30, cy: 64, r: 8 },
+              desc: 'Higher viscosity, lower Re = calmer flow. Vortices are a bit more damped, cylinder sits slightly higher and further right (cx/cy shifted).'
+            }
+          ]
         }
-      ]
+      }
     }
   };
 
   const paramFields = el('paramFields');
   const cardBody = el('cardBody');
   const datasetSelect = el('dataset');
+  const modeSelect = el('mode');
+  const modeField = el('modeField');
+  const modeDesc = el('modeDesc');
 
-  function updatePresetInfo(ds){
+  // The presets for whatever dataset + test set is currently selected.
+  function currentPresets(){
+    const ds = DATASETS[datasetSelect.value];
+    if (!ds) return [];
+    const m = ds.modes[modeSelect.value];
+    return (m && m.presets) ? m.presets : [];
+  }
+
+  function updatePresetInfo(){
     const presetSelect = el('preset');
     if (!presetSelect) return;
-    const preset = ds.presets.find(p => p.id === presetSelect.value) || ds.presets[0];
+    const presets = currentPresets();
+    const preset = presets.find(p => p.id === presetSelect.value) || presets[0];
+    if (!preset) return;
     const v = preset.values;
     el('presetValues').textContent =
       `ν=${v.niu} · Re=${v.re} · cx=${v.cx} · cy=${v.cy} · r=${v.r}`;
     el('presetDesc').textContent = preset.desc;
   }
 
-  function renderParams(key){
+  // Rebuilt from scratch whenever the dataset or the test set changes, so the
+  // setup list always shows only the setups that actually exist in the data
+  // being run. Switching to Quick replaces the full set's Setup A/B entirely.
+  function renderParams(){
     paramFields.innerHTML = '';
-    const ds = DATASETS[key];
-    if (!ds || !ds.presets || !ds.presets.length) return;
+    const presets = currentPresets();
+    if (!presets.length) return;
 
     const wrap = document.createElement('div');
     wrap.className = 'field';
     wrap.innerHTML = `
       <label for="preset">Setup</label>
       <select id="preset">
-        ${ds.presets.map(p => `<option value="${p.id}">${p.label}</option>`).join('')}
+        ${presets.map(p => `<option value="${p.id}">${p.label}</option>`).join('')}
       </select>
       <p class="hint" id="presetValues"></p>
       <p class="preset-desc" id="presetDesc"></p>
     `;
     paramFields.appendChild(wrap);
 
-    el('preset').addEventListener('change', () => updatePresetInfo(ds));
-    updatePresetInfo(ds);
+    el('preset').addEventListener('change', updatePresetInfo);
+    updatePresetInfo();
+  }
+
+  function updateModeDesc(){
+    const ds = DATASETS[datasetSelect.value];
+    const m = ds && ds.modes[modeSelect.value];
+    modeDesc.textContent = m ? m.desc : '';
   }
 
   datasetSelect.addEventListener('change', () => {
     const ds = DATASETS[datasetSelect.value];
     cardBody.textContent = ds ? ds.card : 'Dataset details will appear here once the dataset options are finalized.';
-    renderParams(datasetSelect.value);
+    modeField.style.display = ds ? 'block' : 'none';
+    updateModeDesc();
+    renderParams();
+  });
+
+  modeSelect.addEventListener('change', () => {
+    updateModeDesc();
+    renderParams();
   });
 
   const seedInput = el('seed');
@@ -518,10 +640,15 @@
   const previewCanvas = el('previewCanvas');
   const previewTipTime = el('previewTipTime');
   const previewCtx = previewCanvas.getContext('2d');
+  const pauseOverlay = el('pauseOverlay');
+  const playState = el('playState');
 
   let runStart = null;
   let timerHandle = null;
   let scrubbing = false;
+  // remembers whether playback was running when a drag started, so the video
+  // can be put back exactly how it was once the drag ends
+  let resumeAfterScrub = false;
   let lastObjectUrl = null;
   let previewSeeking = false;   // a seek on previewVideo is in flight
   let previewPending = null;    // newest requested time while seeking
@@ -569,6 +696,9 @@
     previewVideo.load();
     previewSeeking = false;
     previewPending = null;
+    scrubbing = false;
+    resumeAfterScrub = false;
+    updatePlayState();
   }
 
   videoPlayer.addEventListener('loadedmetadata', () => {
@@ -584,6 +714,7 @@
     frameBadge.style.display = 'inline-block';
     frameBadge.textContent = formatTime(0) + ' / ' + formatTime(videoPlayer.duration || 0);
     frameReadout.textContent = formatTime(0);
+    updatePlayState();
   });
 
   videoPlayer.addEventListener('error', () => {
@@ -606,6 +737,36 @@
     if (videoPlayer.paused) videoPlayer.play();
     else videoPlayer.pause();
   });
+
+  // --- Play / pause state ----------------------------------------------
+  // Driven off the video element's own events rather than set by hand at each
+  // call site, so the badge and overlay can't drift out of sync with reality.
+  function updatePlayState(){
+    const hasVideo = !!videoPlayer.src && videoPlayer.style.display !== 'none';
+    if (!hasVideo){
+      pauseOverlay.classList.remove('show');
+      playState.textContent = '--';
+      playState.className = 'play-state';
+      return;
+    }
+    if (scrubbing){
+      pauseOverlay.classList.remove('show');
+      playState.textContent = 'Scrubbing';
+      playState.className = 'play-state scrubbing';
+      return;
+    }
+    const playing = !videoPlayer.paused && !videoPlayer.ended;
+    pauseOverlay.classList.toggle('show', !playing);
+    playState.textContent = videoPlayer.ended ? 'Ended'
+                          : playing ? 'Playing' : 'Paused';
+    playState.className = 'play-state' + (playing ? ' playing' : '');
+  }
+
+  videoPlayer.addEventListener('play', updatePlayState);
+  videoPlayer.addEventListener('playing', updatePlayState);
+  videoPlayer.addEventListener('pause', updatePlayState);
+  videoPlayer.addEventListener('ended', updatePlayState);
+  videoPlayer.addEventListener('seeked', updatePlayState);
 
   clearBtn.addEventListener('click', () => {
     stopTimer();
@@ -651,10 +812,10 @@
   // dataset name from its whitelist. Keep the translation in one place.
   const DATASET_API_NAME = { karman_vortex: 'karman vortex street' };
 
-  // Preset ids -> the setup letter the API expects. This is what actually
-  // changes which of the 100 real samples gets rendered (block A = ids
-  // 0-49, block B = ids 50-99); seed then picks the id inside that block.
-  const PRESET_TO_SETUP = { setup_a: 'A', setup_b: 'B' };
+  // Preset ids -> the setup letter the API expects. The setup picks a block of
+  // real samples and the seed picks one inside it. Which blocks exist depends
+  // on the test set: quick has A/B/C (5 each), full has A/B (50 each).
+  const PRESET_TO_SETUP = { setup_a: 'A', setup_b: 'B', setup_c: 'C' };
 
   const POLL_MS = 1000;
   let pollHandle = null;
@@ -666,6 +827,11 @@
     generateBtn.disabled = false;
     generateBtn.textContent = 'Generate';
     seedInput.disabled = false;
+    // the test set can't change mid-run -- it decides what's being generated
+    modeSelect.disabled = false;
+    datasetSelect.disabled = false;
+    const p = el('preset');
+    if (p) p.disabled = false;
   }
 
   function failRun(message){
@@ -719,11 +885,16 @@
     }
 
     const seed = clampSeed();
-    const dataset = DATASETS[datasetKey];
+    const mode = modeSelect.value;
+    const presets = currentPresets();
     const presetSelect = el('preset');
     const preset =
-      dataset.presets.find(p => p.id === (presetSelect && presetSelect.value)) ||
-      dataset.presets[0];
+      presets.find(p => p.id === (presetSelect && presetSelect.value)) || presets[0];
+    if (!preset){
+      viewerMsg.style.display = 'block';
+      viewerMsg.textContent = 'No setup available for this test set.';
+      return;
+    }
     const setup = PRESET_TO_SETUP[preset.id];
     if (!setup){
       viewerMsg.style.display = 'block';
@@ -734,10 +905,15 @@
     generateBtn.disabled = true;
     generateBtn.textContent = 'Running…';
     seedInput.disabled = true;
+    modeSelect.disabled = true;
+    datasetSelect.disabled = true;
+    if (presetSelect) presetSelect.disabled = true;
     setStatus('running');
     startTimer();
     clearVideo();
-    viewerMsg.textContent = 'Generating…';
+    // 3 min vs 20 min is a big difference -- say which one they're in for
+    const waitHint = mode === 'quick' ? 'about 3 minutes' : 'about 20 minutes';
+    viewerMsg.textContent = 'Generating… this takes ' + waitHint + '.';
 
     let res;
     try {
@@ -747,6 +923,7 @@
         body: JSON.stringify({
           dataset: DATASET_API_NAME[datasetKey],
           seed: seed,
+          mode: mode,
           setup: setup,
           niu: preset.values.niu,
           re:  preset.values.re,
@@ -780,15 +957,53 @@
     pollHandle = setInterval(pollStatus, POLL_MS);
   });
 
+  // --- Scrubbing --------------------------------------------------------
+  // Dragging the timeline pauses playback for the duration of the drag, then
+  // restores whatever state it was in. Without this the video keeps playing
+  // while you drag: it fights the scrub, and if it runs off the end it pauses
+  // itself, so dragging backwards afterwards leaves it stopped.
+
+  function beginScrub(){
+    if (!videoPlayer.src || scrubbing) return;
+    scrubbing = true;
+    // .ended counts as "not playing" -- don't auto-resume a finished video
+    resumeAfterScrub = !videoPlayer.paused && !videoPlayer.ended;
+    if (resumeAfterScrub) videoPlayer.pause();
+    updatePlayState();
+  }
+
+  function endScrub(){
+    if (!scrubbing) return;
+    scrubbing = false;
+    if (resumeAfterScrub){
+      resumeAfterScrub = false;
+      // play() rejects if something interrupts it; nothing to do about that
+      const p = videoPlayer.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+    updatePlayState();
+  }
+
+  // pointer events cover mouse, touch and pen with one set of handlers
+  timeline.addEventListener('pointerdown', beginScrub);
+  timeline.addEventListener('pointerup', endScrub);
+  timeline.addEventListener('pointercancel', endScrub);
+  // keyboard users move the slider with arrows, which never fires pointerdown
+  timeline.addEventListener('keydown', beginScrub);
+  timeline.addEventListener('keyup', endScrub);
+  // fires on release in every browser; harmless as a second call since
+  // endScrub returns early when a scrub isn't in progress
+  timeline.addEventListener('change', endScrub);
+
   timeline.addEventListener('input', () => {
     if (!videoPlayer.src) return;
-    scrubbing = true;
+    // safety net: if some input path didn't trigger beginScrub, start one now
+    if (!scrubbing) beginScrub();
     const t = parseFloat(timeline.value);
     videoPlayer.currentTime = t;
     frameReadout.textContent = formatTime(t);
     frameBadge.textContent = formatTime(t) + ' / ' + formatTime(videoPlayer.duration || 0);
   });
-  timeline.addEventListener('change', () => { scrubbing = false; });
 
   // --- Hover-scrub thumbnail (YouTube-style) ---------------------------
   function hidePreviewTip(){ previewTip.style.display = 'none'; }
