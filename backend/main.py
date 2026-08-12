@@ -1,4 +1,3 @@
-
 import shutil
 import threading
 from pathlib import Path
@@ -28,11 +27,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup A/B -> which block of the 100-sample instructor test set to draw
-# from. The actual sample id is block_start + seed % 50, so seed both picks
-# the diffusion noise and (within the chosen setup) which real sample is shown.
-SETUP_BLOCKS = {"A": 0, "B": 50}
-BLOCK_SIZE = 50
+# Which block of samples each setup maps to, per mode: setup -> (start, size).
+# The sample actually rendered is start + seed % size, so the setup picks the
+# parameter group and the seed picks a specific sample inside it.
+#
+# The two modes have genuinely different data, so their setups differ:
+#   quick -- 15 clips in 3 groups of 5   (A: Re 70, B: Re 90, C: Re 70 shifted)
+#   full  -- 100 clips in 2 groups of 50 (A: Re 76.19, B: Re 69.57)
+# Setup C exists only in quick mode; asking for it in full mode is rejected.
+MODE_SETUPS = {
+    "quick": {"A": (0, 5), "B": (5, 5), "C": (10, 5)},
+    "full":  {"A": (0, 50), "B": (50, 50)},
+}
 
 # keep this many most-recent videos in output/; older ones get deleted once a
 # new run finishes successfully
@@ -45,7 +51,7 @@ app.mount("/output", StaticFiles(directory=output_dir), name="output")
 
 # serve the UI from here too, so the page and the API share an origin and
 # CORS never enters into it
-frontend_file = Path(__file__).parent / "frontend" / "index.html"
+frontend_file = Path(__file__).parent / "index.html"
 
 
 @app.get("/")
@@ -76,29 +82,40 @@ def _cleanup_intermediates(paths: dict):
     shutil.rmtree(render_dir, ignore_errors=True)
 
 
-def run_job(inputs: RequiredInputs):
+def resolve_sample_idx(mode: str, setup: str, seed: int) -> int:
+    """Turn a mode + setup + seed into one specific test-sample id.
+
+    Raises KeyError if the setup doesn't exist in that mode (e.g. C in full).
+    """
+    start, size = MODE_SETUPS[mode][setup]
+    return start + (seed % size)
+
+
+def run_job(inputs: RequiredInputs, sample_idx: int):
     """Runs in a background thread so /generate can answer immediately
     instead of freezing the whole server for the length of a generation.
 
-    run_generation takes a dataset, a seed, and (now) a sample_idx -- which of
-    the 100 real test samples to render. setup A/B picks the block of ids,
-    seed picks which id inside that block, so both controls visibly change
-    the output. re/niu/cx/cy/r are still accepted for display purposes but
-    aren't separately fed to the pipeline -- they come along with whichever
-    real sample gets picked.
+    sample_idx is resolved by the caller (so a bad setup/mode pairing gets
+    rejected before a job is ever started). re/niu/cx/cy/r are accepted for
+    display purposes but aren't separately fed to the pipeline -- they come
+    along with whichever real sample gets picked.
     """
-    sample_idx = SETUP_BLOCKS[inputs.setup] + (inputs.seed % BLOCK_SIZE)
     try:
         paths = run_generation(
-            dataset=inputs.dataset, seed=inputs.seed, sample_idx=sample_idx
+            dataset=inputs.dataset,
+            seed=inputs.seed,
+            sample_idx=sample_idx,
+            mode=inputs.mode,
         )
 
         # the pipeline writes its mp4 deep inside DIFFATS_ROOT, which the
-        # /output mount can't see. Copy it in under a per-seed name so one
-        # run can't clobber the last, then hand back the URL form of it.
+        # /output mount can't see. Copy it in under a name carrying mode +
+        # seed + sample id, so no two runs can clobber each other.
         source = Path(paths["video_path"])
         slug = inputs.dataset.replace(" ", "_")
-        destination = output_dir / f"{slug}_seed{inputs.seed}_id{sample_idx}.mp4"
+        destination = (
+            output_dir / f"{slug}_{inputs.mode}_seed{inputs.seed}_id{sample_idx}.mp4"
+        )
         shutil.copy2(source, destination)
 
         _cleanup_intermediates(paths)
@@ -111,15 +128,33 @@ def run_job(inputs: RequiredInputs):
 
 @app.post("/generate", response_model=StatusResponse)
 def generate(inputs: RequiredInputs):
+    # Reject an impossible setup/mode pairing before touching the GPU.
+    # Setup C only exists in quick mode, where the data has three groups.
+    try:
+        sample_idx = resolve_sample_idx(inputs.mode, inputs.setup, inputs.seed)
+    except KeyError:
+        valid = ", ".join(sorted(MODE_SETUPS[inputs.mode]))
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Setup {inputs.setup} does not exist in {inputs.mode} mode. "
+                f"Valid setups: {valid}."
+            ),
+        )
+
     # start_job returns None when a job is already running -- the "one job at a time" rule
-    job_id = whiteboard.start_job(inputs.seed, inputs.dataset)
+    job_id = whiteboard.start_job(
+        inputs.seed, inputs.dataset, mode=inputs.mode, sample_idx=sample_idx
+    )
     if job_id is None:
         raise HTTPException(
             status_code=409,
             detail="A job is already running. Check /status and try again.",
         )
 
-    threading.Thread(target=run_job, args=(inputs,), daemon=True).start()
+    threading.Thread(
+        target=run_job, args=(inputs, sample_idx), daemon=True
+    ).start()
     return status(job_id=job_id)
 
 
@@ -152,5 +187,8 @@ def result(job_id: str | None = None):
             detail="No finished video yet. Check /status to see what's happening.",
         )
 
-    url, dataset, seed, current_id = answer
-    return ResultResponse(url=url, dataset=dataset, seed=seed, job_id=current_id)
+    url, dataset, seed, current_id, mode, sample_idx = answer
+    return ResultResponse(
+        url=url, dataset=dataset, seed=seed, job_id=current_id,
+        mode=mode, sample_idx=sample_idx,
+    )
