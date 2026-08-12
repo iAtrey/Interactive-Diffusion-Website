@@ -1,5 +1,5 @@
 """
-making_videos.py — side-by-side comparison of ground truth vs. generated
+making_videos_api.py - side-by-side comparison of ground truth vs. generated
 Karman-vortex 2D vorticity for one test sample.
 
   Left  panel : ground truth   (test_shard_*.pt)
@@ -13,9 +13,7 @@ Two style variants are produced in a single run:
   1. "vor"     - original yellow/green/black vorticity colormap on a dark
                  background, with the top title bar.
   2. "redblue" - matplotlib RdBu_r diverging colormap on a white background,
-                 no top title, larger panel titles and bottom info text,
-                 typeset in Nimbus Sans (the URW open-source equivalent of
-                 Helvetica, metrically compatible).
+                 no top title, larger panel titles and bottom info text.
 """
 
 import os
@@ -27,7 +25,6 @@ import sys
 import numpy as np
 import torch
 import matplotlib as mpl
-import matplotlib.cm as mcm
 import matplotlib.colors as mcolors
 from PIL import Image, ImageDraw, ImageFont
 
@@ -41,9 +38,16 @@ parser.add_argument("--gen_path", required=True)
 parser.add_argument("--gt_dir", required=True)
 parser.add_argument("--out_dir", required=True)
 # If given, render this exact sample instead of picking one at random. This is
-# what lets a caller (run_generation.py) choose a specific, hyperspecific
-# sample rather than getting whatever random.Random(SEED) happens to land on.
+# what lets a caller (run_generation.py) choose a specific sample rather than
+# getting whatever random.Random(SEED) happens to land on.
 parser.add_argument("--sample_idx", type=int, default=None)
+# How many clips live in each test_shard_NNN.pt. This MUST match the dataset
+# being rendered or the ground-truth panel pairs against the wrong clip:
+#   instructor_test (100 samples) -> 50
+#   tucker_test     (15 samples)  -> 5
+# Wrong values are usually caught by the parameter cross-check below, but only
+# after the work is done, so pass the right one.
+parser.add_argument("--samples_per_shard", type=int, default=50)
 args = parser.parse_args()
 
 GEN_PATH = args.gen_path
@@ -54,9 +58,7 @@ SEED              = 0
 FPS               = 20
 CONDITION_SECONDS = 3.0
 N_ANIM_FRAMES     = 200
-# Instructor test set: 100 samples across two 50-sample shards
-# (test_shard_000.pt = Setup A ids 0-49, test_shard_001.pt = Setup B ids 50-99).
-SAMPLES_PER_SHARD = 50
+SAMPLES_PER_SHARD = args.samples_per_shard
 
 # ---------------------------------------------------------------------------
 # Colormaps
@@ -69,17 +71,17 @@ _vor_colors = [
     (0.176, 0.976, 0.529),
     (0.0, 1.0, 1.0),
 ]
-VOR_CMAP    = mcolors.LinearSegmentedColormap.from_list("vor_cmap", _vor_colors)
-REDBLUE_CMAP = mpl.colormaps.get_cmap("RdBu_r")
+VOR_CMAP     = mcolors.LinearSegmentedColormap.from_list("vor_cmap", _vor_colors)
+REDBLUE_CMAP = mpl.colormaps["RdBu_r"]
 
 _LUT_N = 256
 
 
-def _build_lut(cmap) -> np.ndarray:
+def _build_lut(cmap):
     return (cmap(np.linspace(0, 1, _LUT_N)) * 255).astype(np.uint8)
 
 
-def apply_lut(data: np.ndarray, lut: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
+def apply_lut(data, lut, vmin, vmax):
     data = np.nan_to_num(data, nan=vmin, posinf=vmax, neginf=vmin)
     idx = np.clip(
         (data - vmin) / (vmax - vmin) * (_LUT_N - 1), 0, _LUT_N - 1
@@ -87,8 +89,7 @@ def apply_lut(data: np.ndarray, lut: np.ndarray, vmin: float, vmax: float) -> np
     return lut[idx]
 
 
-def vor_to_image(vor_frame: np.ndarray, lut: np.ndarray,
-                  vmin: float, vmax: float) -> Image.Image:
+def vor_to_image(vor_frame, lut, vmin, vmax):
     """Same orientation as exp_karman_vortex/tucker_karman_demo.py."""
     rgba = apply_lut(vor_frame.T[::-1], lut, vmin, vmax)
     return Image.fromarray(rgba, mode="RGBA").transpose(Image.Transpose.ROTATE_270)
@@ -97,41 +98,41 @@ def vor_to_image(vor_frame: np.ndarray, lut: np.ndarray,
 # Sample selection (shared across both styles)
 # ---------------------------------------------------------------------------
 
-print(f"Loading generated tensor:\n  {GEN_PATH}")
+print("Loading generated tensor:\n  %s" % GEN_PATH, flush=True)
 gen = torch.load(GEN_PATH, map_location="cpu", weights_only=False)
 videos = gen["videos"]
 N = videos.shape[0]
-print(f"  videos shape: {tuple(videos.shape)}")
+print("  videos shape: %s" % (tuple(videos.shape),), flush=True)
 
 if args.sample_idx is not None:
     if not (0 <= args.sample_idx < N):
-        sys.exit(f"ERROR: --sample_idx {args.sample_idx} out of range [0, {N - 1}]")
+        sys.exit("ERROR: --sample_idx %d out of range [0, %d]" % (args.sample_idx, N - 1))
     idx = args.sample_idx
-    print(f"\nUsing requested sample idx = {idx}")
+    print("\nUsing requested sample idx = %d" % idx, flush=True)
 else:
     rng = random.Random(SEED)
     idx = rng.randrange(N)
-    print(f"\nPicked random sample idx = {idx}")
+    print("\nPicked random sample idx = %d" % idx, flush=True)
 
 shard_id = idx // SAMPLES_PER_SHARD
 in_shard = idx %  SAMPLES_PER_SHARD
-print(f"  ->  test_shard_{shard_id:03d}.pt[{in_shard}]")
+print("  ->  test_shard_%03d.pt[%d]" % (shard_id, in_shard), flush=True)
 
-gt_path = os.path.join(GT_DIR, f"test_shard_{shard_id:03d}.pt")
-print(f"Loading ground truth:\n  {gt_path}")
+gt_path = os.path.join(GT_DIR, "test_shard_%03d.pt" % shard_id)
+print("Loading ground truth:\n  %s" % gt_path, flush=True)
 gt_shard = torch.load(gt_path, map_location="cpu", weights_only=False)
 gt_clip  = gt_shard[in_shard]
 
 for key in ("niu", "cx", "cy", "r"):
     a = float(gen[key][idx].item())
     b = float(gt_clip[key])
-    assert abs(a - b) < 1e-3, f"param mismatch on {key}: gen={a} gt={b}"
-print("  parameter check OK")
+    assert abs(a - b) < 1e-3, "param mismatch on %s: gen=%s gt=%s" % (key, a, b)
+print("  parameter check OK", flush=True)
 
 vor_gt  = gt_clip["vor"].numpy()                  # (201, 128, 128)
 vor_gen = videos[idx].numpy()                     # (200, 128, 128)
-print(f"  GT  vor shape: {vor_gt.shape}")
-print(f"  GEN vor shape: {vor_gen.shape}")
+print("  GT  vor shape: %s" % (vor_gt.shape,), flush=True)
+print("  GEN vor shape: %s" % (vor_gen.shape,), flush=True)
 
 meta = dict(
     Re   = float(gt_clip["Re"]),
@@ -141,19 +142,19 @@ meta = dict(
     r    = int(gt_clip["r"]),
     step_start = int(gt_clip["step_start"]),
 )
-print(f"  metadata: {meta}")
+print("  metadata: %s" % meta, flush=True)
 
 sigma = float(vor_gt.std())
 VMIN  = max(float(vor_gt.min()), -3.0 * sigma)
 VMAX  = min(float(vor_gt.max()),  3.0 * sigma)
-print(f"\nColor scale (±3σ of GT): vmin={VMIN:.5f}  vmax={VMAX:.5f}")
+print("\nColor scale (+/-3 sigma of GT): vmin=%.5f  vmax=%.5f" % (VMIN, VMAX), flush=True)
 
 # ---------------------------------------------------------------------------
 # Font helpers
 # ---------------------------------------------------------------------------
 
 
-def load_font(candidate_paths, size: int) -> ImageFont.ImageFont:
+def load_font(candidate_paths, size):
     for path in candidate_paths:
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
@@ -192,7 +193,7 @@ STYLES = [
         fg=(240, 240, 240, 255),
         border=(90, 90, 90, 255),
         show_title=True,
-        title_text="Karman Vortex 2D  —  Ground Truth vs. Our Method",
+        title_text="Karman Vortex 2D  -  Ground Truth vs. Our Method",
         top_title_h=36,
         panel_title_h=28,
         bottom_info_h=32,
@@ -235,7 +236,7 @@ STYLES = [
 # ---------------------------------------------------------------------------
 
 
-def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple:
+def _text_size(draw, text, font):
     l, t, r, b = draw.textbbox((0, 0), text, font=font)
     return r - l, b - t
 
@@ -301,17 +302,14 @@ def render_frame(style, gt_frame, gen_frame, frame_label, condition):
 # ---------------------------------------------------------------------------
 
 
-def _find_ffmpeg() -> str:
+def _find_ffmpeg():
     p = shutil.which("ffmpeg")
     if p:
         return p
-    fallback = "/apps/spack/anvil/apps/ffmpeg/4.2.2-gcc-8.4.1-tuidm5x/bin/ffmpeg"
-    if os.path.exists(fallback):
-        return fallback
-    sys.exit("ERROR: ffmpeg not found. Run `module load ffmpeg/4.2.2` and rerun.")
+    sys.exit("ERROR: ffmpeg not found on PATH.")
 
 
-def save_gif(frames, path: str, fps: int):
+def save_gif(frames, path, fps):
     palette_ref = frames[0].quantize(colors=256)
     gif_frames  = [palette_ref] + [f.quantize(palette=palette_ref) for f in frames[1:]]
     duration_ms = int(round(1000 / fps))
@@ -321,14 +319,20 @@ def save_gif(frames, path: str, fps: int):
     )
 
 
-def save_mp4(frames, path: str, fps: int, ffmpeg_bin: str):
+def save_mp4(frames, path, fps, ffmpeg_bin):
     w, h = frames[0].size
+    # H.264, not mpeg4. Safari plays MPEG-4 Part 2 because it borrows macOS's
+    # decoders, but Chrome ships its own and has no decoder for it -- the file
+    # downloads fine and then shows a black player. H.264 + yuv420p works
+    # everywhere; faststart lets playback begin before the whole file arrives.
     cmd = [
         ffmpeg_bin, "-y", "-loglevel", "error",
         "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-s", f"{w}x{h}", "-pix_fmt", "rgb24",
+        "-s", "%dx%d" % (w, h), "-pix_fmt", "rgb24",
         "-r", str(fps), "-i", "-",
-        "-c:v", "mpeg4", "-q:v", "1", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         path,
     ]
@@ -337,7 +341,7 @@ def save_mp4(frames, path: str, fps: int, ffmpeg_bin: str):
         proc.stdin.write(np.asarray(f, dtype=np.uint8).tobytes())
     proc.stdin.close()
     if proc.wait() != 0:
-        sys.exit(f"ffmpeg exited non-zero while writing {path}")
+        sys.exit("ffmpeg exited non-zero while writing %s" % path)
 
 # ---------------------------------------------------------------------------
 # Build and save each style
@@ -347,17 +351,17 @@ os.makedirs(OUT_DIR, exist_ok=True)
 ffmpeg_bin = _find_ffmpeg()
 n_pause    = int(round(CONDITION_SECONDS * FPS))
 n_total    = n_pause + N_ANIM_FRAMES
-print(f"\nFrames per video: {n_pause} pause + {N_ANIM_FRAMES} animated "
-      f"= {n_total}  (@{FPS} fps  =>  {n_total / FPS:.1f} s)")
+print("\nFrames per video: %d pause + %d animated = %d  (@%d fps => %.1f s)"
+      % (n_pause, N_ANIM_FRAMES, n_total, FPS, n_total / FPS), flush=True)
 
 for style in STYLES:
-    print(f"\n=== style: {style['name']} ===")
+    print("\n=== style: %s ===" % style["name"], flush=True)
 
     frames = []
 
     condition_img = render_frame(
         style, vor_gt[0], vor_gt[0],
-        frame_label=f"frame 000 / {N_ANIM_FRAMES - 1:03d}",
+        frame_label="frame 000 / %03d" % (N_ANIM_FRAMES - 1),
         condition=True,
     )
     frames.extend([condition_img] * n_pause)
@@ -365,20 +369,20 @@ for style in STYLES:
     for t in range(N_ANIM_FRAMES):
         img = render_frame(
             style, vor_gt[t], vor_gen[t],
-            frame_label=f"frame {t:03d} / {N_ANIM_FRAMES - 1:03d}",
+            frame_label="frame %03d / %03d" % (t, N_ANIM_FRAMES - 1),
             condition=False,
         )
         frames.append(img)
         if (t + 1) % 50 == 0:
-            print(f"  rendered {t + 1}/{N_ANIM_FRAMES}")
+            print("  rendered %d/%d" % (t + 1, N_ANIM_FRAMES), flush=True)
 
-    print(f"  saving GIF -> {style['out_gif']}")
+    print("  saving GIF -> %s" % style["out_gif"], flush=True)
     save_gif(frames, style["out_gif"], FPS)
-    print(f"    {os.path.getsize(style['out_gif']) / 1e6:.2f} MB")
+    print("    %.2f MB" % (os.path.getsize(style["out_gif"]) / 1e6), flush=True)
 
-    print(f"  saving MP4 -> {style['out_mp4']}")
+    print("  saving MP4 -> %s" % style["out_mp4"], flush=True)
     save_mp4(frames, style["out_mp4"], FPS, ffmpeg_bin)
-    print(f"    {os.path.getsize(style['out_mp4']) / 1e6:.2f} MB")
+    print("    %.2f MB" % (os.path.getsize(style["out_mp4"]) / 1e6), flush=True)
 
-print("\nDone.")
-print(f"  Outputs in: {OUT_DIR}")
+print("\nDone.", flush=True)
+print("  Outputs in: %s" % OUT_DIR, flush=True)
