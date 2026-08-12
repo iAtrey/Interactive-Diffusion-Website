@@ -18,9 +18,14 @@ class RequiredInputs(BaseModel) :
     cx: int | None = None
     cy: int | None = None
     r: int | None = None
-    # which real test-sample block to draw from -- A = ids 0-49, B = ids 50-99.
-    # the actual id is block_start + seed % 50, computed in main.py.
-    setup: Literal["A", "B"]
+    # which test set to run against.
+    #   quick = 15 clips,  ~3 min,  3 setups of 5   (A, B, C)
+    #   full  = 100 clips, ~20 min, 2 setups of 50  (A, B)
+    mode: Literal["quick", "full"]
+    # which block of samples to draw from within that mode. Which letters are
+    # valid depends on the mode, so main.py does that check -- C is only real
+    # in quick mode. The actual sample id is block_start + seed % block_size.
+    setup: Literal["A", "B", "C"]
 
 
 
@@ -44,3 +49,5 @@ class ResultResponse (BaseModel) :
     dataset : Literal ["karman vortex street"]
     seed : int = Field( ge=1, le=999)
     job_id: str | None = None
+    mode: Literal["quick", "full"] | None = None
+    sample_idx: int | None = None
